@@ -38,6 +38,8 @@ def parse_instagram_url(value: str) -> InstagramLink:
             return InstagramLink("profile", username)
     if len(segments) == 2 and segments[0] in {"p", "reel", "reels"} and SHORTCODE.fullmatch(segments[1]):
         return InstagramLink("post", segments[1])
+    if len(segments) == 3 and segments[:2] == ["stories", "highlights"] and MEDIA_ID.fullmatch(segments[2]):
+        return InstagramLink("highlight", segments[2])
     if len(segments) == 3 and segments[0] == "stories" and USERNAME.fullmatch(segments[1]) and MEDIA_ID.fullmatch(segments[2]):
         return InstagramLink("story", segments[2], segments[1])
     if len(segments) == 2 and segments[0] == "s":

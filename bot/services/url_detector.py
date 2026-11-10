@@ -147,6 +147,8 @@ def classify_url(value: str) -> SourceLink | None:
     elif platform == "Instagram":
         if len(segments) == 2 and segments[0] in {"p", "reel", "reels"} and IDENTIFIER.fullmatch(segments[1]):
             return SourceLink(platform, f"https://www.instagram.com/{segments[0]}/{segments[1]}/")
+        if len(segments) == 3 and segments[:2] == ["stories", "highlights"] and NUMERIC.fullmatch(segments[2]):
+            return SourceLink(platform, f"https://www.instagram.com/stories/highlights/{segments[2]}/", "highlight")
         if len(segments) == 3 and segments[0] == "stories" and USERNAME.fullmatch(segments[1]) and NUMERIC.fullmatch(segments[2]):
             return SourceLink(platform, f"https://www.instagram.com/stories/{segments[1]}/{segments[2]}/")
         # instagram.com/{handle} – shared via the profile's "Copy Link" button.
@@ -161,7 +163,7 @@ def classify_url(value: str) -> SourceLink | None:
                 # gallery-dl's highlight extractor expects the code directly
                 # before the query. A slash here is parsed as part of its
                 # base64 code and makes otherwise valid highlights fail.
-                return SourceLink(platform, f"https://www.instagram.com/s/{segments[1]}?story_media_id={media_id}")
+                return SourceLink(platform, f"https://www.instagram.com/s/{segments[1]}?story_media_id={media_id}", "highlight")
     elif platform == "Telegram":
         # /c/<peer>/<post> – private channel, reachable only by the session.
         if len(segments) == 3 and segments[0] == "c" and NUMERIC.fullmatch(segments[1]) and NUMERIC.fullmatch(segments[2]):
