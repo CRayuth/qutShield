@@ -1,6 +1,6 @@
 # qutShield
 
-qutShield is a Telegram bot that downloads public videos and photos from YouTube, TikTok, Instagram, Facebook, X, and Telegram. It supports short links, Reels, accessible Stories, and photo albums. Send up to five links in one message; new requests wait in a per-user queue. `/stop` cancels the current download and clears the queue.
+qutShield is a Telegram bot that downloads public videos and photos from YouTube, TikTok, Instagram, Facebook, X, and Telegram. Supports short links, Reels, Stories, and album selection in private chats. Send up to five links per message; new requests wait in a per-user queue. `/stop` cancels the current download and clears the queue.
 
 ## Run
 

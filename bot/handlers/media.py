@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -11,22 +12,24 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
-from aiogram import Bot, Router
-from aiogram.enums import ChatAction, MessageEntityType
+from aiogram import Bot, F, Router
+from aiogram.enums import ChatAction, ChatType, MessageEntityType
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
 from bot.services.extractor import ExtractionError, extract_media
 from bot.services.message_style import CHECKING, COMPLETE, QUEUED, UNSUPPORTED, UPLOADING, extraction_error, fetching
+from bot.services.media_selection import create_previews, selection_keyboard, selection_text
 from bot.services.ready import listener
 from bot.services.status_messages import complete, delete_message, failure, notice
 from bot.services.telegram_sender import send_assets
 from bot.services.url_detector import SourceLink, candidate_urls, classify_url, resolve_link
-from bot.state import Job, JobManager, QueuedJob
+from bot.state import Job, JobManager, QueuedJob, SelectionSession
 
 
 router = Router()
 logger = logging.getLogger(__name__)
+SELECTION_TIMEOUT = 180
 
 
 async def _set_job_status(bot: Bot, job: Job, text: str) -> None:
@@ -42,13 +45,14 @@ async def _set_job_status(bot: Bot, job: Job, text: str) -> None:
             logger.debug("job_id=%s stage=status error=%s", job.id, type(error).__name__)
 
 
-async def _keep_action(bot: Bot, chat_id: int, stopped):
+async def _keep_action(bot: Bot, chat_id: int, stopped, job: Job | None = None):
     """Resend chat-action every 4 s so the indicator stays visible."""
     while not stopped.is_set():
-        try:
-            await bot.send_chat_action(chat_id, ChatAction.TYPING)
-        except TelegramAPIError:
-            pass
+        if job is None or job.selection is None:
+            try:
+                await bot.send_chat_action(chat_id, ChatAction.TYPING)
+            except TelegramAPIError:
+                pass
         # Chat actions expire after 5 s; check stopped frequently so we
         # exit promptly when the job finishes.
         for _ in range(8):
@@ -81,77 +85,116 @@ async def _resolve_inputs(inputs, jobs: JobManager, job: Job) -> list[SourceLink
     return links
 
 
-async def _process_one(index: int, link: SourceLink, bot: Bot, jobs: JobManager, job: Job, root: Path) -> bool:
-    async with jobs.slots:
-        if job.stopped.is_set():
-            return False
-        directory = root / f"link-{index}"
-        directory.mkdir()
-        stage = "extraction"
-        started = time.monotonic()
-        delivered = 0
-        sent = set()
-        buffer = []
-        send_lock = asyncio.Lock()
-
-        async def flush_buffer():
-            nonlocal delivered, buffer
-            if not buffer:
-                return
-            batch, buffer = buffer, []
-            await _set_job_status(bot, job, UPLOADING)
-            delivered += await send_assets(bot, job.chat_id, batch, job.stopped)
-
-        async def emit(asset):
-            nonlocal stage
-            if id(asset) in sent:
-                return
-            if job.stopped.is_set():
-                raise InterruptedError("Stopped")
-            stage = "telegram_upload"
-            async with send_lock:
-                if id(asset) in sent:
-                    return
-                sent.add(id(asset))
-                buffer.append(replace(asset, source_url=link.display_url) if link.display_url else asset)
-                if len(buffer) >= 10:
-                    await flush_buffer()
-
-        token = listener.set(emit)
+async def _choose_assets(bot: Bot, job: Job, assets: list, directory: Path, slots: asyncio.Semaphore) -> list:
+    """Show a preview album, wait for the requester, then return only chosen files."""
+    async with slots:
+        previews = await create_previews(assets, directory, job.stopped)
+    preview_ids = []
+    selector_id = None
+    try:
+        for start in range(0, len(previews), 10):
+            batch = previews[start:start + 10]
+            if len(batch) == 1:
+                sent = await bot.send_photo(job.chat_id, FSInputFile(batch[0]), caption=f"Preview {start + 1}")
+                preview_ids.append(sent.message_id)
+            else:
+                try:
+                    sent = await bot.send_media_group(
+                        job.chat_id,
+                        [InputMediaPhoto(media=FSInputFile(path), caption="Previews • tap numbers below to choose" if start == 0 and offset == 0 else None)
+                         for offset, path in enumerate(batch)],
+                    )
+                    preview_ids.extend(item.message_id for item in sent)
+                except TelegramAPIError:
+                    for offset, path in enumerate(batch, start + 1):
+                        sent = await bot.send_photo(job.chat_id, FSInputFile(path), caption=f"Preview {offset}")
+                        preview_ids.append(sent.message_id)
+        await _set_job_status(bot, job, "🖼 Previews ready. Choose items below.")
+        prompt = await bot.send_message(
+            job.chat_id, selection_text(set(), len(assets)),
+            reply_markup=selection_keyboard(job.id, len(assets), set()),
+        )
+        selector_id = prompt.message_id
+        session = SelectionSession(selector_id, len(assets), asyncio.get_running_loop().create_future())
+        job.selection = session
         try:
-            try:
+            chosen = await asyncio.wait_for(session.result, timeout=SELECTION_TIMEOUT)
+        except asyncio.TimeoutError:
+            job.error_text = "⌛ Selection expired. Send the link again."
+            return []
+        except asyncio.CancelledError:
+            if job.stopped.is_set():
+                raise InterruptedError("Stopped") from None
+            raise
+        if not chosen:
+            job.error_text = "⏭ No media selected."
+        return [assets[index] for index in chosen]
+    finally:
+        job.selection = None
+        await asyncio.gather(*(delete_message(bot, job.chat_id, message_id) for message_id in [*preview_ids, *([selector_id] if selector_id else [])]))
+
+
+async def _process_one(index: int, link: SourceLink, bot: Bot, jobs: JobManager, job: Job, root: Path) -> bool:
+    if job.stopped.is_set():
+        return False
+    directory = root / f"link-{index}"
+    directory.mkdir()
+    stage = "extraction"
+    started = time.monotonic()
+    collected = []
+    seen = set()
+
+    async def emit(asset):
+        if job.stopped.is_set():
+            raise InterruptedError("Stopped")
+        if id(asset) not in seen:
+            seen.add(id(asset))
+            collected.append(replace(asset, source_url=link.display_url) if link.display_url else asset)
+
+    token = listener.set(emit)
+    try:
+        try:
+            async with jobs.slots:
                 assets = await extract_media(link, directory, job.stopped)
-                total_bytes = sum(asset.path.stat().st_size for asset in assets)
-                logger.info("job_id=%s platform=%s stage=extraction seconds=%.2f items=%d bytes=%d remote_candidates=%d", job.id, link.platform, time.monotonic() - started, len(assets), total_bytes, sum(bool(asset.remote_url) for asset in assets))
                 for asset in assets:
                     await emit(asset)
-                async with send_lock:
-                    await flush_buffer()
-                logger.info("job_id=%s platform=%s stage=telegram_upload delivered=%d expected=%d", job.id, link.platform, delivered, len(assets))
-                return delivered > 0
-            except InterruptedError:
-                job.stopped.set()
+            total_bytes = sum(asset.path.stat().st_size for asset in collected)
+            logger.info("job_id=%s platform=%s stage=extraction seconds=%.2f items=%d bytes=%d remote_candidates=%d", job.id, link.platform, time.monotonic() - started, len(collected), total_bytes, sum(bool(asset.remote_url) for asset in collected))
+            if len(collected) > 1 and job.allow_selection:
+                stage = "selection"
+                async with job.selection_lock:
+                    if job.stopped.is_set():
+                        raise InterruptedError("Stopped")
+                    collected = await _choose_assets(bot, job, collected, directory, jobs.slots)
+            if not collected or job.stopped.is_set():
                 return False
-            except (ExtractionError, ValueError, httpx.HTTPError, TelegramAPIError) as error:
-                code = "TELEGRAM_UPLOAD_FAILED" if isinstance(error, TelegramAPIError) else getattr(error, "code", "EXTRACTION_FAILED" if stage == "extraction" else "DOWNLOAD_FAILED")
-                job.error_text = extraction_error(code)
-                reason = getattr(error, "message", None) or str(error)
-                source = urlsplit(link.url)
-                # Keep the media path/ID for troubleshooting, but omit query
-                # parameters that may contain share tokens or tracking data.
-                source_ref = f"{source.hostname or ''}{source.path}"[:200]
-                logger.warning("job_id=%s platform=%s source=%s stage=%s seconds=%.2f error=%s details=%s reason=%.200s", job.id, link.platform, source_ref, stage, time.monotonic() - started, code, type(error).__name__, reason)
-                return False
-            except Exception as error:
-                logger.exception("job_id=%s platform=%s stage=%s error=UNEXPECTED details=%s", job.id, link.platform, stage, type(error).__name__)
-                return False
-        finally:
-            listener.reset(token)
-            shutil.rmtree(directory, ignore_errors=True)
+            stage = "telegram_upload"
+            async with jobs.slots:
+                await _set_job_status(bot, job, UPLOADING)
+                delivered = await send_assets(bot, job.chat_id, collected, job.stopped)
+            logger.info("job_id=%s platform=%s stage=telegram_upload delivered=%d expected=%d", job.id, link.platform, delivered, len(collected))
+            return delivered > 0
+        except InterruptedError:
+            job.stopped.set()
+            return False
+        except (ExtractionError, ValueError, httpx.HTTPError, TelegramAPIError) as error:
+            code = "TELEGRAM_UPLOAD_FAILED" if isinstance(error, TelegramAPIError) else getattr(error, "code", "EXTRACTION_FAILED" if stage == "extraction" else "DOWNLOAD_FAILED")
+            job.error_text = extraction_error(code)
+            source = urlsplit(link.url)
+            source_ref = f"{source.hostname or ''}{source.path}"[:200]
+            reason = re.sub(r"https?://\S+", "[link]", str(error))[:200]
+            logger.warning("job_id=%s platform=%s source=%s stage=%s seconds=%.2f error=%s details=%s reason=%s", job.id, link.platform, source_ref, stage, time.monotonic() - started, code, type(error).__name__, reason)
+            return False
+        except Exception as error:
+            logger.exception("job_id=%s platform=%s stage=%s error=UNEXPECTED details=%s", job.id, link.platform, stage, type(error).__name__)
+            return False
+    finally:
+        listener.reset(token)
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 async def process(message: Message, bot: Bot, inputs, jobs: JobManager, job: Job) -> None:
-    action_task = asyncio.create_task(_keep_action(bot, job.chat_id, job.stopped))
+    action_task = asyncio.create_task(_keep_action(bot, job.chat_id, job.stopped, job))
     failed = False
     error_text = "❌ Couldn't download this media."
     started = time.monotonic()
@@ -195,6 +238,61 @@ async def process(message: Message, bot: Bot, inputs, jobs: JobManager, job: Job
             await _set_job_status(bot, next_item.job, CHECKING)
 
 
+@router.callback_query(F.data.startswith("pick:"))
+async def select_media(callback: CallbackQuery, bot: Bot, jobs: JobManager) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) not in {3, 4} or not isinstance(callback.message, Message):
+        await callback.answer("Selection unavailable.", show_alert=True)
+        return
+    job = jobs.jobs.get((callback.message.chat.id, callback.from_user.id))
+    session = job.selection if job and job.id == parts[1] else None
+    if not session or session.message_id != callback.message.message_id or session.result.done():
+        await callback.answer("Selection expired.", show_alert=True)
+        return
+    async with session.lock:
+        if session.result.done():
+            await callback.answer("Selection expired.", show_alert=True)
+            return
+        action = parts[2]
+        if action == "toggle" and len(parts) == 4 and parts[3].isdigit():
+            index = int(parts[3])
+            if index >= session.count:
+                await callback.answer("Invalid item.", show_alert=True)
+                return
+            if index in session.selected:
+                session.selected.remove(index)
+            else:
+                session.selected.add(index)
+            try:
+                await bot.edit_message_text(
+                    text=selection_text(session.selected, session.count),
+                    chat_id=job.chat_id, message_id=session.message_id,
+                    reply_markup=selection_keyboard(job.id, session.count, session.selected),
+                )
+            except TelegramAPIError:
+                if index in session.selected:
+                    session.selected.remove(index)
+                else:
+                    session.selected.add(index)
+                await callback.answer("Couldn't update selection. Try again.", show_alert=True)
+                return
+            await callback.answer()
+        elif action == "send" and len(parts) == 3:
+            if not session.selected:
+                await callback.answer("Select at least one item.", show_alert=True)
+                return
+            session.result.set_result(sorted(session.selected))
+            await callback.answer("Sending selected media.")
+        elif action == "all" and len(parts) == 3:
+            session.result.set_result(list(range(session.count)))
+            await callback.answer("Sending all media.")
+        elif action == "skip" and len(parts) == 3:
+            session.result.set_result([])
+            await callback.answer("Skipped.")
+        else:
+            await callback.answer("Invalid selection.", show_alert=True)
+
+
 @router.message()
 async def handle_media(message: Message, bot: Bot, jobs: JobManager) -> None:
     hidden = [entity.url for entity in (*(message.entities or ()), *(message.caption_entities or ())) if entity.type == MessageEntityType.TEXT_LINK and entity.url]
@@ -214,7 +312,10 @@ async def handle_media(message: Message, bot: Bot, jobs: JobManager) -> None:
         return
     status_text = QUEUED if active else CHECKING
     status = await message.answer(status_text)
-    job = Job(user_id=key[1], chat_id=key[0], status_message_id=status.message_id)
+    job = Job(
+        user_id=key[1], chat_id=key[0], status_message_id=status.message_id,
+        allow_selection=message.chat.type == ChatType.PRIVATE and message.from_user is not None,
+    )
     job.status_text = status_text
     result = jobs.submit(QueuedJob(job, message, raw))
     if result == "full":

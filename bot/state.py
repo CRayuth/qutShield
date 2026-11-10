@@ -16,6 +16,7 @@ class Job:
     user_id: int
     chat_id: int
     status_message_id: int
+    allow_selection: bool = False
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     stopped: threading.Event = field(default_factory=threading.Event)
     task: asyncio.Task | None = None
@@ -24,6 +25,17 @@ class Job:
     cancelled_status_ids: list[int] = field(default_factory=list)
     status_text: str = ""
     status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    selection_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    selection: "SelectionSession | None" = None
+
+
+@dataclass
+class SelectionSession:
+    message_id: int
+    count: int
+    result: asyncio.Future[list[int]]
+    selected: set[int] = field(default_factory=set)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 @dataclass
@@ -74,6 +86,8 @@ class JobManager:
         job = self.jobs.get(key)
         if job:
             job.stopped.set()
+            if job.selection and not job.selection.result.done():
+                job.selection.result.cancel()
             job.cancelled_status_ids.extend(item.job.status_message_id for item in self.pending.pop(key, ()))
         return job
 

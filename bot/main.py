@@ -10,6 +10,7 @@ from aiogram.client.telegram import TelegramAPIServer
 from dotenv import load_dotenv
 
 from bot.handlers import commands, media
+from bot.services.user_stats import UserStats, UserStatsMiddleware
 from bot.state import JobManager
 
 
@@ -47,13 +48,17 @@ async def run() -> None:
         bot = Bot(token=token, session=session)
         logging.getLogger(__name__).info("using self-hosted Bot API at %s", os.getenv("TELEGRAM_API_SERVER_URL", "").strip())
     dispatcher = Dispatcher()
+    stats = UserStats()
+    dispatcher.message.outer_middleware(UserStatsMiddleware(stats))
+    dispatcher.callback_query.outer_middleware(UserStatsMiddleware(stats))
     dispatcher.include_router(commands.router)
     dispatcher.include_router(media.router)
     jobs = JobManager()
     try:
         await bot.delete_webhook(drop_pending_updates=False)
-        await dispatcher.start_polling(bot, jobs=jobs)
+        await dispatcher.start_polling(bot, jobs=jobs, user_stats=stats)
     finally:
+        stats.close()
         await bot.session.close()
 
 
