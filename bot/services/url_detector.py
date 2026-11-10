@@ -1,6 +1,8 @@
 """Recognize supported links and reject unsafe redirects."""
 
 import asyncio
+import base64
+import binascii
 import ipaddress
 import re
 import socket
@@ -159,11 +161,21 @@ def classify_url(value: str) -> SourceLink | None:
         # turns an instant "Unsupported link" into a real extraction attempt.
         if len(segments) == 2 and segments[0] == "s":
             media_id = parse_qs(parts.query).get("story_media_id", [""])[0]
-            if IDENTIFIER.fullmatch(segments[1].rstrip("=")) and NUMERIC.fullmatch(media_id):
+            code = segments[1]
+            if IDENTIFIER.fullmatch(code.rstrip("=")) and NUMERIC.fullmatch(media_id):
                 # gallery-dl's highlight extractor expects the code directly
                 # before the query. A slash here is parsed as part of its
                 # base64 code and makes otherwise valid highlights fail.
-                return SourceLink(platform, f"https://www.instagram.com/s/{segments[1]}?story_media_id={media_id}", "highlight")
+                return SourceLink(platform, f"https://www.instagram.com/s/{code}?story_media_id={media_id}", "highlight")
+            if not media_id and IDENTIFIER.fullmatch(code.rstrip("=")):
+                try:
+                    decoded = base64.urlsafe_b64decode(code + "=" * (-len(code) % 4)).decode("ascii")
+                except (ValueError, UnicodeError, binascii.Error):
+                    return None
+                if decoded.startswith("highlight:") and NUMERIC.fullmatch(decoded[10:]):
+                    # A mobile share of the whole highlight has no story_media_id.
+                    # Turn it into the collection URL the gallery extractor reads.
+                    return SourceLink(platform, f"https://www.instagram.com/stories/highlights/{decoded[10:]}/", "highlight")
     elif platform == "Telegram":
         # /c/<peer>/<post> – private channel, reachable only by the session.
         if len(segments) == 3 and segments[0] == "c" and NUMERIC.fullmatch(segments[1]) and NUMERIC.fullmatch(segments[2]):

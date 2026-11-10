@@ -48,8 +48,12 @@ def parse_instagram_url(value: str) -> InstagramLink:
         except (ValueError, UnicodeError, binascii.Error):
             raise ValueError("Invalid Instagram highlight URL") from None
         story_id = parse_qs(parts.query).get("story_media_id", [""])[0]
-        if decoded.startswith("highlight:") and MEDIA_ID.fullmatch(decoded[10:]) and MEDIA_ID.fullmatch(story_id):
-            return InstagramLink("highlight", story_id, decoded[10:])
+        if decoded.startswith("highlight:") and MEDIA_ID.fullmatch(decoded[10:]):
+            if story_id:
+                if MEDIA_ID.fullmatch(story_id):
+                    return InstagramLink("highlight", story_id, decoded[10:])
+            else:
+                return InstagramLink("highlight", decoded[10:])
     raise ValueError("Send an Instagram profile, post, story, or highlight URL")
 
 

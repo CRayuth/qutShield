@@ -11,7 +11,7 @@ from bot.state import JobManager
 
 router = Router()
 START_TEXT = "qutShield\n\nSend a link. I'll return its video or photos.\n\nYouTube • TikTok • Instagram\nFacebook • X"
-HELP_TEXT = "❔ Send up to five links. In private chats, choose items from previews for multi-item posts. New messages queue while I work.\n\n/status shows your job and total users. /stop cancels your download and clears your queue."
+HELP_TEXT = "❔ Send up to five links. On Instagram mobile, open a Highlight, tap ⋯ or Share, then Copy link. In private chats, choose items from previews for multi-item posts. New messages queue while I work.\n\n/status shows your job and total users. /stop cancels your download and clears your queue."
 START_BUTTONS = InlineKeyboardMarkup(inline_keyboard=[[
     InlineKeyboardButton(text="❔ Help", callback_data="help"),
     InlineKeyboardButton(text="📡 Status", callback_data="status"),
