@@ -1,0 +1,36 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+/tests/
+/.qutshield-git/
+data/
+secrets/
+*_cookies.txt
+# Live MTProto session string -- never commit.
+telegram.session
+*.session
+*.session-journal
+
+# Local deployment details and generated diagnostics stay on this machine.
+/deploy.ps1
+/compose.home.yaml
+/COMPATIBILITY.md
+/MUSTREAD.md
+/scripts/logout_cloud_bot.py
+/scripts/check_local_tgapi.py
+/scripts/check_media_backends.py
+/tools/
+/eval/
+/.test_tmp/
+/test_tmp/
+/test_tmp_run/
+/scratch_*
+/fb_check_*.jpg
+/image.png
+/tests/image.png
+/*.zip

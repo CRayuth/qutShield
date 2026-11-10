@@ -1,0 +1,7 @@
+.env
+secrets/
+*_cookies.txt
+tests/
+*.md
+__pycache__/
+*.pyc

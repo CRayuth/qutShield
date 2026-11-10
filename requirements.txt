@@ -1,0 +1,15 @@
+aiogram>=3.31,<4
+instaloader>=4.14,<5
+httpx>=0.28,<0.29
+requests>=2.32,<3
+python-dotenv>=1,<2
+gallery-dl>=1.32,<2
+pillow>=11,<13
+# MTProto client, used only to read media from Telegram chats the bot is not a
+# member of. Uploads still go through the Bot API so media stays attributed to
+# @qutclaw_bot. StringSession matches the owner's existing session file format.
+telethon>=1.41,<2
+# Pinned exactly because patches/apply_ytdlp_facebook_stories.py rewrites
+# anchors inside yt_dlp/extractor/facebook.py. Bumping this version must be
+# accompanied by re-checking those anchors (the build fails loudly otherwise).
+yt-dlp[default,curl-cffi]==2026.10.26
