@@ -92,7 +92,7 @@ def _smuggled_url(segments) -> bool:
 class SourceLink:
     platform: str
     url: str
-    # ``media`` is one post/reel/photo; ``profile`` is a whole account grid.
+    # ``media`` is one post/reel/photo; ``profile`` and ``highlight`` are collections.
     kind: str = "media"
     # Keep the user's share link for captions while extractors use its target.
     display_url: str = ""
@@ -197,6 +197,9 @@ def classify_url(value: str) -> SourceLink | None:
         # /stories/{numeric_uid}/{story_id}/
         if len(segments) == 3 and segments[0] == "stories" and NUMERIC.fullmatch(segments[1]) and STORY_ID.fullmatch(segments[2]):
             return SourceLink(platform, f"https://www.facebook.com/stories/{segments[1]}/{segments[2]}/")
+        # /stories/{numeric_uid}/ opens the actor's story highlight collection.
+        if len(segments) == 2 and segments[0] == "stories" and NUMERIC.fullmatch(segments[1]):
+            return SourceLink(platform, f"https://www.facebook.com/stories/{segments[1]}/", "highlight")
         # /{username}/posts|photos|videos/{numeric_id}/ – public timeline items
         if len(segments) == 3 and segments[1] in {"posts", "photos"} and NUMERIC.fullmatch(segments[2]) and HANDLE.fullmatch(segments[0]):
             return SourceLink(platform, f"https://www.facebook.com/{segments[0]}/{segments[1]}/{segments[2]}/")

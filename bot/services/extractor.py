@@ -173,12 +173,14 @@ def _yt_dlp_download(link: SourceLink, directory: Path, stopped, metadata: dict 
     job_cookie = _job_cookie_file(link.platform, directory)
     authenticated = bool(job_cookie)
     facebook_story = link.platform == "Facebook" and "/stories/" in link.url
+    facebook_highlight = facebook_story and link.kind == "highlight"
     info = None
     last_error = None
     for target in _impersonate_targets(link.platform):
         options = {
             "quiet": True, "no_warnings": True, "noprogress": True,
             "noplaylist": not facebook_story,
+            "playlistend": 20 if facebook_highlight else None,
             "format": _tiktok_format() if link.platform == "TikTok" else _format_order(),
             "merge_output_format": "mp4",
             "outtmpl": str(directory / ("media-%(id)s.%(ext)s" if facebook_story else "video.%(ext)s")),
@@ -226,7 +228,7 @@ def _yt_dlp_download(link: SourceLink, directory: Path, stopped, metadata: dict 
     if facebook_story:
         suffixes.update({".jpg", ".jpeg", ".png", ".webp"})
     files = [path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in suffixes]
-    return files[:10], title if isinstance(title, str) else ""
+    return files[:20 if facebook_highlight else 10], title if isinstance(title, str) else ""
 
 
 def _gallery_urls(link: SourceLink, stopped, limit: int = 20) -> list[str]:

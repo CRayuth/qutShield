@@ -21,7 +21,9 @@ def fetching(links: list[SourceLink]) -> str:
         return "⬇️ Fetching media…"
     link = links[0]
     path = urlsplit(link.url).path.lower()
-    if "/stories/" in path:
+    if link.platform == "Facebook" and link.kind == "highlight":
+        kind = "Highlight"
+    elif "/stories/" in path:
         kind = "Story"
     elif "/reel" in path:
         kind = "Reel"
